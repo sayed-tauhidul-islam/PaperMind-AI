@@ -46,6 +46,9 @@ ALLOWED_HOSTS = [
     ).split(",")
     if host.strip()
 ]
+render_hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
+if render_hostname and render_hostname not in ALLOWED_HOSTS:
+    ALLOWED_HOSTS.append(render_hostname)
 
 
 # Application definition
@@ -144,15 +147,13 @@ DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 # PaperMind AI Configuration
 
-ALLOWED_HOSTS = [
-    "localhost",
-    "127.0.0.1",
-]
-
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "http://127.0.0.1:5173",
-]
+_local_origins = "http://localhost:5173,http://127.0.0.1:5173"
+_configured_origins = os.getenv("CORS_ALLOWED_ORIGINS", _local_origins)
+_frontend_url = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
+CORS_ALLOWED_ORIGINS = [origin.strip().rstrip("/") for origin in _configured_origins.split(",") if origin.strip()]
+if _frontend_url and _frontend_url not in CORS_ALLOWED_ORIGINS:
+    CORS_ALLOWED_ORIGINS.append(_frontend_url)
+CSRF_TRUSTED_ORIGINS = [origin.strip().rstrip("/") for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if origin.strip()]
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"

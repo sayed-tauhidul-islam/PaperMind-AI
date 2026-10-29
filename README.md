@@ -69,7 +69,7 @@ The analysis and chat features use the Groq Chat Completions API with the `opena
 - Ask questions about a selected paper and retrieve saved question/answer history with evidence.
 - Export a saved analysis as a Markdown report.
 - Read a selected passage or the current PDF page with browser text-to-speech, with adjustable playback speed. The in-app reader shows the source PDF beside selectable extracted page text.
-- Open paper Q&A in a same-page popup, choose from five workspace themes, upload a profile image or select one of ten preset icons, and see daily usage quotas.
+- Open paper Q&A in a same-page popup, choose from ten workspace themes, upload a profile image or select one of ten preset icons, and see daily usage quotas.
 - Search related papers through Google Scholar, Semantic Scholar, arXiv, or Crossref; search datasets through Kaggle, Hugging Face, UCI, or Zenodo.
 
 Daily usage defaults are 10 PDF uploads and 30 chat messages per account. The backend enforces these limits; the dashboard and chat show current usage.
@@ -250,7 +250,33 @@ Create an account, upload a selectable-text PDF, then request analysis or choose
 | `FRONTEND_URL` | No | Frontend address inserted into production password-reset email text; defaults to localhost. |
 | `VITE_API_URL` | No | Frontend API base URL; defaults to `http://127.0.0.1:8000/api`. |
 
-The checked-in Django settings currently allow `localhost` and `127.0.0.1` as hosts and allow the local Vite origins for CORS. Update `ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS` in `backend/config/settings.py` for your deployed domains. Configure a real email backend for password reset email delivery in deployment.
+`ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS` are configurable with environment variables. Set `CORS_ALLOWED_ORIGINS` to the deployed frontend origin(s), comma-separated, and `ALLOWED_HOSTS` to the backend host. Configure a real email backend for password reset email delivery in deployment.
+
+### Deploy frontend to Vercel and backend to Render
+
+These are separate services. The frontend must be told the public backend API URL; otherwise production builds cannot use the local development API.
+
+**Vercel** (project root: `frontend`; build command: `npm run build`; output directory: `dist`): add this Production environment variable, using the public URL shown on your Render web service:
+
+```dotenv
+VITE_API_URL=https://YOUR-RENDER-SERVICE.onrender.com/api
+```
+
+Redeploy the Vercel project after changing environment variables.
+
+**Render** (web service root: repository root `.`; build command: `pip install -r requirements.txt`; start command: `cd backend && python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT`): configure these environment variables:
+
+```dotenv
+DJANGO_SECRET_KEY=<a long random secret>
+DJANGO_DEBUG=False
+ALLOWED_HOSTS=YOUR-RENDER-SERVICE.onrender.com
+CORS_ALLOWED_ORIGINS=https://paper-mind-ai-git-main-sayed-tauhidul-islams-projects.vercel.app
+FRONTEND_URL=https://paper-mind-ai-git-main-sayed-tauhidul-islams-projects.vercel.app
+GROQ_API_KEY_1=<your Groq API key>
+DATABASE_URL=<your Render PostgreSQL connection URL>
+```
+
+Use the actual Render service hostname and the Vercel production domain assigned to your project. Add any other active Vercel domain to `CORS_ALLOWED_ORIGINS`, separated by commas. A persistent PostgreSQL database is recommended; Render's local filesystem and SQLite database are not reliable persistent storage for production user data or uploaded PDFs.
 
 ## 🔌 API overview
 
