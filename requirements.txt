@@ -1,0 +1,10 @@
+Django==5.2.18
+djangorestframework
+django-cors-headers
+python-dotenv
+PyMuPDF
+requests
+gunicorn
+whitenoise
+dj-database-url
+psycopg[binary]
