@@ -25,3 +25,16 @@ class ChatMessage(models.Model):
     answer = models.TextField()
     evidence = models.JSONField(default=list, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ChatLearningMemory(models.Model):
+    owner = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="chat_learning_memories")
+    paper = models.ForeignKey("papers.Paper", on_delete=models.CASCADE, related_name="learning_memories")
+    source_message = models.OneToOneField(ChatMessage, on_delete=models.CASCADE, related_name="learning_memory")
+    question = models.TextField(max_length=4000)
+    answer = models.TextField(max_length=10000)
+    evidence = models.JSONField(default=list, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]

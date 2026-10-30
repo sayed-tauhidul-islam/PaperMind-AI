@@ -52,14 +52,18 @@ The analysis and chat features use the Groq Chat Completions API with the `opena
 ### 🔐 Accounts
 
 - Register and sign in with email and password.
+- Verify email ownership with an expiring verification link before signing in. Configure SMTP for production delivery; development prints messages in the backend console.
 - View and update profile details, change password, and delete an account.
-- Request a password reset. In development, reset credentials are returned by the API; in production, the backend attempts to email the reset details.
-- Authenticated requests use a signed bearer token with a 30-day maximum age.
+- Request a password reset with an emailed 6-digit code that expires after 15 minutes and is single-use.
+- Authenticated requests use a signed 12-hour HttpOnly session cookie, bound to the current password hash.
 
 ### 📂 Paper library
 
-- Upload PDF files up to 20 MB; the backend checks the PDF signature and extracts selectable text with PyMuPDF.
-- Search and filter papers in the library, rename a paper, preview or download its PDF, and delete it.
+- Upload PDF or Word DOCX files up to 20 MB; the backend validates the file and extracts text. Images and legacy `.doc` files are rejected.
+- PDF files use PyMuPDF and Tesseract OCR for scanned pages when Tesseract is installed.
+- Search and filter papers in the library, add searchable tags, rename a paper, preview or download its PDF, and delete it.
+- Save and edit page-linked notes and text highlights in the PDF reader.
+- Export paper citations as BibTeX, RIS, or an APA-style text citation.
 - Keep papers scoped to their owner. Deleting a paper also deletes its uploaded file.
 
 ### 🧠 Analysis, chat, and review
@@ -67,6 +71,8 @@ The analysis and chat features use the Groq Chat Completions API with the `opena
 - Generate and cache a structured analysis covering objective, problem, methodology, findings, conclusion, limitations, future research, summary, confidence, and evidence.
 - Keep the analysis overview focused on paper metadata: topic, authors, year, publication type, datasets and availability, and named models with short explanations. Analysis sections are presented as bullet points.
 - Ask questions about a selected paper and retrieve saved question/answer history with evidence.
+- Retrieve short, question-relevant passages across the document; chat evidence is marked when its quote matches extracted source text.
+- Verify analysis evidence against the extracted paper text, and compare two to four papers across methods, data, findings, and limitations.
 - Export a saved analysis as a Markdown report.
 - Read a selected passage or the current PDF page with browser text-to-speech, with adjustable playback speed. The in-app reader shows the source PDF beside selectable extracted page text.
 - Open paper Q&A in a same-page popup, choose from ten workspace themes, upload a profile image or select one of ten preset icons, and see daily usage quotas.
@@ -92,10 +98,10 @@ Daily usage defaults are 10 PDF uploads and 30 chat messages per account. The ba
 
 ### Typical user flow
 
-1. The user registers or signs in. The frontend stores the returned bearer token in browser `localStorage` and sends it with authenticated API requests.
+1. The user registers or signs in. The backend sets a signed HttpOnly session cookie; unsafe API requests also include a CSRF token.
 2. The user uploads a PDF. The backend validates the upload, extracts text page by page, labels extracted sections with page numbers, and saves the file and text against the signed-in account.
-3. When requested, the analyzer sends up to 18,000 characters of extracted text to Groq. It validates the returned JSON shape and saves the analysis on the paper so later requests can use the cached result.
-4. For paper chat, the backend sends the question and up to 18,000 characters of that paper's text to Groq, then stores the answer and evidence as chat history.
+3. When requested, the analyzer selects up to 30,000 characters of extracted text for Groq. It validates the returned JSON shape and saves the analysis on the paper so later requests can use the cached result.
+4. For paper chat, the backend retrieves up to 9,000 characters of question-relevant text, then stores the answer and evidence as chat history.
 5. The frontend displays the result, opens the source PDF through an authenticated endpoint, exports a Markdown report, or reads saved analysis with the browser's English voice.
 
 ### 🗺️ Flow chart
@@ -103,7 +109,7 @@ Daily usage defaults are 10 PDF uploads and 30 chat messages per account. The ba
 ```mermaid
 flowchart TD
     A[User] --> B[React and Vite app]
-    B -->|Bearer token + JSON or PDF| C[Django REST API]
+    B -->|HttpOnly cookie + CSRF protected requests| C[Django REST API]
     C --> D{Authenticated and owns resource?}
     D -->|No| E[Return authorization or validation error]
     D -->|Yes| F{Requested operation}
@@ -128,7 +134,7 @@ flowchart TD
 ```text
 Browser
   React UI (frontend/src/App.jsx)
-      │ fetch + Authorization: Bearer <token>
+      │ fetch + HttpOnly cookie + X-CSRFToken
       ▼
   Django REST Framework API (backend)
       ├── common     account endpoints and token authentication
@@ -141,7 +147,7 @@ Browser
        PDF media files          (analysis and question answering)
 ```
 
-The frontend uses a small API helper in `frontend/src/services/api.js` to attach the configured API base URL and bearer token. Django's URL configuration mounts each feature under `/api/`. The backend's default REST permission is authenticated; registration, login, password reset, and status endpoints explicitly allow unauthenticated access where needed.
+The frontend uses a small API helper in `frontend/src/services/api.js` to attach the configured API base URL, HttpOnly-cookie credentials, and CSRF header for unsafe requests. Django's URL configuration mounts each feature under `/api/`. The backend's default REST permission is authenticated; registration, login, password reset, and status endpoints explicitly allow unauthenticated access where needed.
 
 ## 🗂️ Repository structure
 
@@ -201,7 +207,7 @@ GROQ_API_KEY_1=your-groq-api-key
 # Example PostgreSQL URL:
 # DATABASE_URL=postgresql://user:password@localhost:5432/papermind
 
-# Used to compose password-reset email details when DEBUG is False.
+# Account email links and verification.
 FRONTEND_URL=http://localhost:5173
 ```
 
@@ -230,25 +236,30 @@ npm install
 npm run dev
 ```
 
-Open the local URL printed by Vite (normally `http://localhost:5173`). The frontend defaults to `http://127.0.0.1:8000/api` for the backend. To use a different API host, create `frontend/.env.local`:
+Open the local URL printed by Vite (normally `http://localhost:5173`). The frontend defaults to `http://localhost:8000/api` for the backend. To use a different API host, create `frontend/.env.local`:
 
 ```dotenv
-VITE_API_URL=http://127.0.0.1:8000/api
+VITE_API_URL=http://localhost:8000/api
 ```
 
-Create an account, upload a selectable-text PDF, then request analysis or choose the paper in AI Chat. Analysis and chat require a valid Groq key and an internet connection.
+Create an account, upload a PDF, then request analysis or choose the paper in AI Chat. Scanned pages require Tesseract OCR installed and available on `PATH` (set `OCR_LANGUAGE` to select its language code). Analysis, chat, and comparison require a valid Groq key and an internet connection.
 
 ## 🔧 Configuration
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
 | `DJANGO_SECRET_KEY` | Production | Django signing and security secret. A local-only fallback exists in settings; always set a private value for deployment. |
-| `DJANGO_DEBUG` | No | Defaults to `True`; set to `False` for deployment. Password reset codes are exposed in the response only in debug mode. |
+| `DJANGO_DEBUG` | Production | Must be `False` for public deployment; Render startup fails closed if it is enabled. |
 | `GROQ_API_KEY_1` | For AI | Primary key for paper analysis and chat. |
 | `GROQ_API_KEY_2` | No | Optional second key attempted when the first analysis/chat request fails. |
+| `OCR_LANGUAGE` | No | Tesseract language code for scanned PDF pages; defaults to `eng`. Install the matching Tesseract language data. |
 | `DATABASE_URL` | No | Database URL; omitted means SQLite at `backend/db.sqlite3`. PostgreSQL URLs are supported. |
-| `FRONTEND_URL` | No | Frontend address inserted into production password-reset email text; defaults to localhost. |
-| `VITE_API_URL` | No | Frontend API base URL; defaults to `http://127.0.0.1:8000/api`. |
+| `FRONTEND_URL` | Production | Exact HTTPS frontend origin used for account emails and CORS configuration. |
+| `EMAIL_HOST`, `EMAIL_PORT`, `EMAIL_HOST_USER`, `EMAIL_HOST_PASSWORD`, `EMAIL_USE_TLS` | Production email | SMTP settings for verification and password-reset delivery. |
+| `DEFAULT_FROM_EMAIL` | No | Sender address used for account emails. |
+| `REDIS_URL` | Production | Shared Redis cache required for distributed API rate limits. |
+| `SECURE_SSL_REDIRECT`, `SECURE_HSTS_SECONDS`, `TRUST_PROXY_SSL_HEADER` | Production | HTTPS/HSTS and reverse-proxy configuration; Render proxy trust is detected from its service hostname. |
+| `VITE_API_URL` | No | Frontend API base URL; defaults to `http://localhost:8000/api`. |
 
 `ALLOWED_HOSTS` and `CORS_ALLOWED_ORIGINS` are configurable with environment variables. Set `CORS_ALLOWED_ORIGINS` to the deployed frontend origin(s), comma-separated, and `ALLOWED_HOSTS` to the backend host. Configure a real email backend for password reset email delivery in deployment.
 
@@ -264,7 +275,7 @@ VITE_API_URL=https://YOUR-RENDER-SERVICE.onrender.com/api
 
 Redeploy the Vercel project after changing environment variables.
 
-**Render** (web service root: repository root `.`; build command: `pip install -r requirements.txt`; start command: `cd backend && python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT`): configure these environment variables:
+**Render** (web service root: repository root `.`; build command: `pip install -r requirements.txt`; start command: `cd backend && python manage.py migrate && gunicorn config.wsgi:application --bind 0.0.0.0:$PORT --workers 1 --worker-class sync`): configure these environment variables:
 
 ```dotenv
 DJANGO_SECRET_KEY=<a long random secret>
@@ -272,18 +283,28 @@ DJANGO_DEBUG=False
 ALLOWED_HOSTS=YOUR-RENDER-SERVICE.onrender.com
 CORS_ALLOWED_ORIGINS=https://paper-mind-ai-git-main-sayed-tauhidul-islams-projects.vercel.app
 FRONTEND_URL=https://paper-mind-ai-git-main-sayed-tauhidul-islams-projects.vercel.app
+REDIS_URL=<your private TLS-enabled Redis URL>
+EMAIL_HOST=<your SMTP host>
+EMAIL_PORT=587
+EMAIL_HOST_USER=<your SMTP username>
+EMAIL_HOST_PASSWORD=<your SMTP password>
+EMAIL_USE_TLS=True
+DEFAULT_FROM_EMAIL=PaperMind AI <noreply@your-domain.example>
 GROQ_API_KEY_1=<your Groq API key>
 DATABASE_URL=<your Render PostgreSQL connection URL>
 ```
 
 Use the actual Render service hostname and the Vercel production domain assigned to your project. Add any other active Vercel domain to `CORS_ALLOWED_ORIGINS`, separated by commas. A persistent PostgreSQL database is recommended; Render's local filesystem and SQLite database are not reliable persistent storage for production user data or uploaded PDFs.
 
+PDF/DOCX extraction runs synchronously. The documented single synchronous Gunicorn worker intentionally processes **one upload at a time per service instance**; additional requests wait for that worker. The account limit is 10 uploads per day, but that is not a concurrency limit. Do not increase worker count based on guesswork: each worker can hold an uploaded file and extracted page data in memory. For higher throughput, move extraction to a Redis-backed background queue and set its worker count after load testing the actual hosting plan.
+
 ## 🔌 API overview
 
-All API routes are prefixed with `/api`. Most endpoints require:
+All API routes are prefixed with `/api`. Sign-in sets an HttpOnly cookie. For unsafe requests, first call `GET /auth/csrf/` and send its `csrfToken` value as `X-CSRFToken`; browser clients must include credentials:
 
 ```http
-Authorization: Bearer <token>
+Cookie: __Host-papermind_session=<HttpOnly session>
+X-CSRFToken: <csrfToken returned by /auth/csrf/>
 ```
 
 | Method | Endpoint | Purpose | Access |
@@ -291,11 +312,13 @@ Authorization: Bearer <token>
 | `GET` | `/health/` | Backend health status | Public |
 | `POST` | `/auth/register/` | Create account | Public |
 | `POST` | `/auth/login/` | Sign in | Public |
+| `GET` | `/auth/csrf/` | Get a CSRF token for protected mutations | Public |
+| `POST` | `/auth/logout/` | Clear the session cookie | Public + CSRF |
 | `GET` | `/auth/usage/` | Read today's PDF-upload and chat-message usage | Authenticated |
 | `GET`, `PATCH` | `/auth/profile/` | Read or update profile | Authenticated |
 | `POST` | `/auth/password/` | Change password | Authenticated |
-| `POST` | `/auth/password-reset/` | Request reset instructions | Public |
-| `POST` | `/auth/password-reset/confirm/` | Set password using reset UID/token | Public |
+| `POST` | `/auth/password-reset/` | Email a 6-digit reset code | Public + rate limited |
+| `POST` | `/auth/password-reset/confirm/` | Set password using email, code, and new password | Public + rate limited |
 | `DELETE` | `/auth/account/` | Delete account and owned data | Authenticated |
 | `GET`, `POST` | `/papers/` | List papers or upload PDF | Authenticated |
 | `GET`, `PATCH`, `DELETE` | `/papers/{id}/` | Read, rename, or delete a paper | Authenticated owner |
@@ -344,23 +367,25 @@ Analysis is stored as JSON on the paper record; chat messages and evidence are s
 ## 🛡️ Security and privacy
 
 - Passwords are handled through Django's authentication and password validation system.
-- API access uses signed tokens with a maximum age of 30 days; tokens are sent in the `Authorization` header.
+- API access uses a signed, HttpOnly session cookie with a 12-hour maximum age; sessions are bound to the current password hash and become invalid after a password reset/change. Unsafe requests require a CSRF token.
+- Login, registration, verification-resend, and password-reset endpoints have rate limits. Production limits use shared Redis, not per-process memory.
+- Password recovery emails a random six-digit code. Only its password hash is stored; codes expire after 15 minutes, allow five attempts, and are single-use.
 - Paper, PDF, analysis, and chat endpoints scope lookups to the authenticated owner.
-- PDF uploads are limited to 20 MB and must have a PDF signature and extractable text.
+- PDF and DOCX uploads are each limited to 20 MB. PDFs are limited to 500 pages and must have a PDF signature; DOCX archives are bounded before XML extraction.
+- API responses use no-store caching and restrictive security headers. Vercel deployment adds a Content Security Policy, HSTS, and browser permission restrictions.
 - AI provider keys are read by the backend from environment variables; they should never be placed in frontend configuration.
-- The frontend currently stores its bearer token in browser `localStorage`. Use HTTPS in deployment and protect the browser session accordingly.
+- The browser does not store the session token in JavaScript-readable storage. Use a custom domain for the frontend and API under the same registrable domain in production; Vercel and Render default domains are cross-site and some browsers block cross-site cookies.
 - Set `DJANGO_DEBUG=False`, a strong `DJANGO_SECRET_KEY`, production host/CORS settings, and a production database before exposing the service publicly.
 
 ## 🚧 Known limitations
 
-- Scanned/image-only PDFs are rejected; OCR is not implemented.
-- Analysis and chat select page-aware excerpts from across the PDF (up to 30,000 characters each). Very long papers can still exceed the context inspected by the model.
+- OCR requires an external Tesseract installation and matching language data; scanned documents with poor image quality can still extract imperfect text.
+- Analysis and chat retrieve selected page-aware excerpts. Very long papers can still contain relevant details outside the retrieved context.
 - AI analysis and chat require a working Groq API key and network connection.
 - Voice playback uses the browser's English text-to-speech voice; Bengali speech is not implemented.
-- Multi-paper comparison and Google sign-in are not implemented.
+- Citation exports are drafts based on paper metadata detected from the PDF and analysis; review missing author, year, venue, and DOI details before publication.
 - Report export is Markdown; PDF-formatted report export is not implemented.
-- Production password reset needs a configured Django email backend. The current production path sends reset UID/token details in an email body, while debug mode returns them directly in the API response.
-- Deployment settings are not fully production-ready out of the box: configure hosts, CORS, email, static/media storage, secrets, and database for your environment.
+- Production account recovery needs working SMTP and DNS/email deliverability (SPF, DKIM, and DMARC) for the sender domain. Production startup requires exact HTTPS host/origin settings, a strong secret, SMTP sender, and Redis. Configure persistent private file storage and a production database for deployment.
 
 ## 💻 Development commands
 

@@ -14,6 +14,7 @@ from pathlib import Path
 import os
 import dj_database_url
 from dotenv import load_dotenv
+from django.core.exceptions import ImproperlyConfigured
 BASE_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(BASE_DIR / ".env")
 
@@ -33,10 +34,13 @@ DATABASES = {
 # See https://docs.djangoproject.com/en/5.2/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-local-only-change-me")
-
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv("DJANGO_DEBUG", "True").lower() == "true"
+SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "django-insecure-local-only-change-me")
+if os.getenv("RENDER_EXTERNAL_HOSTNAME") and DEBUG:
+    raise ImproperlyConfigured("DJANGO_DEBUG must be False on a public Render deployment.")
+if not DEBUG and (SECRET_KEY == "django-insecure-local-only-change-me" or len(SECRET_KEY) < 50):
+    raise ImproperlyConfigured("Set DJANGO_SECRET_KEY to a private random value of at least 50 characters in production.")
 
 ALLOWED_HOSTS = [
      host.strip()
@@ -49,6 +53,8 @@ ALLOWED_HOSTS = [
 render_hostname = os.getenv("RENDER_EXTERNAL_HOSTNAME", "").strip()
 if render_hostname and render_hostname not in ALLOWED_HOSTS:
     ALLOWED_HOSTS.append(render_hostname)
+if not DEBUG and (not ALLOWED_HOSTS or "*" in ALLOWED_HOSTS):
+    raise ImproperlyConfigured("Configure exact ALLOWED_HOSTS before running with DJANGO_DEBUG=False.")
 
 
 # Application definition
@@ -62,6 +68,7 @@ INSTALLED_APPS = [
     'django.contrib.staticfiles',
     "rest_framework",
     "corsheaders",
+    "common.apps.CommonConfig",
     "papers",
     "analyzer",
     "chat",
@@ -69,10 +76,12 @@ INSTALLED_APPS = [
 
 MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
+    "common.middleware.ApiSecurityHeadersMiddleware",
     'django.contrib.sessions.middleware.SessionMiddleware',
     "corsheaders.middleware.CorsMiddleware",
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
+    "common.middleware.ApiCsrfProtectionMiddleware",
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
@@ -153,7 +162,18 @@ _frontend_url = os.getenv("FRONTEND_URL", "").strip().rstrip("/")
 CORS_ALLOWED_ORIGINS = [origin.strip().rstrip("/") for origin in _configured_origins.split(",") if origin.strip()]
 if _frontend_url and _frontend_url not in CORS_ALLOWED_ORIGINS:
     CORS_ALLOWED_ORIGINS.append(_frontend_url)
-CSRF_TRUSTED_ORIGINS = [origin.strip().rstrip("/") for origin in os.getenv("CSRF_TRUSTED_ORIGINS", "").split(",") if origin.strip()]
+_configured_csrf_origins = os.getenv("CSRF_TRUSTED_ORIGINS", "").strip() or _configured_origins
+CSRF_TRUSTED_ORIGINS = [origin.strip().rstrip("/") for origin in _configured_csrf_origins.split(",") if origin.strip()]
+if _frontend_url and _frontend_url not in CSRF_TRUSTED_ORIGINS:
+    CSRF_TRUSTED_ORIGINS.append(_frontend_url)
+PAPERMIND_SESSION_COOKIE = "__Host-papermind_session" if not DEBUG else "papermind_session"
+CSRF_COOKIE_NAME = "__Host-papermind_csrf" if not DEBUG else "csrftoken"
+CSRF_COOKIE_HTTPONLY = True
+CSRF_COOKIE_SECURE = not DEBUG
+CSRF_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"
+SESSION_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "None" if not DEBUG else "Lax"
 
 MEDIA_URL = "/media/"
 MEDIA_ROOT = BASE_DIR / "media"
@@ -161,10 +181,88 @@ MEDIA_ROOT = BASE_DIR / "media"
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["common.authentication.PaperMindTokenAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
-    "DEFAULT_RENDERER_CLASSES": [
-        "rest_framework.renderers.JSONRenderer",
-        "rest_framework.renderers.BrowsableAPIRenderer",
+    "DEFAULT_THROTTLE_CLASSES": [
+        "rest_framework.throttling.AnonRateThrottle",
+        "rest_framework.throttling.UserRateThrottle",
     ],
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": os.getenv("API_ANON_RATE", "120/hour"),
+        "user": os.getenv("API_USER_RATE", "1200/hour"),
+        "login": os.getenv("LOGIN_RATE", "10/hour"),
+        "password_reset_request": os.getenv("PASSWORD_RESET_REQUEST_RATE", "5/hour"),
+        "password_reset_confirm": os.getenv("PASSWORD_RESET_CONFIRM_RATE", "20/hour"),
+        "register": os.getenv("REGISTER_RATE", "5/hour"),
+        "resend_verification": os.getenv("RESEND_VERIFICATION_RATE", "3/hour"),
+    },
+    # Only set this to the trusted reverse-proxy hop count. Render supplies
+    # and normalizes X-Forwarded-For; arbitrary proxy headers must not be trusted.
+    "NUM_PROXIES": int(os.getenv("API_NUM_PROXIES", "1" if render_hostname else "0")),
+    "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"] + (
+        ["rest_framework.renderers.BrowsableAPIRenderer"] if DEBUG else []
+    ),
 }
 
 CORS_ALLOW_CREDENTIALS = True
+
+SECURE_SSL_REDIRECT = os.getenv("SECURE_SSL_REDIRECT", "false" if DEBUG else "true").lower() == "true"
+SESSION_COOKIE_SECURE = os.getenv("SESSION_COOKIE_SECURE", "false" if DEBUG else "true").lower() == "true"
+CSRF_COOKIE_SECURE = os.getenv("CSRF_COOKIE_SECURE", "false" if DEBUG else "true").lower() == "true"
+SECURE_HSTS_SECONDS = int(os.getenv("SECURE_HSTS_SECONDS", "0" if DEBUG else "31536000"))
+SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv("SECURE_HSTS_INCLUDE_SUBDOMAINS", "false").lower() == "true"
+SECURE_HSTS_PRELOAD = os.getenv("SECURE_HSTS_PRELOAD", "false").lower() == "true"
+SECURE_CONTENT_TYPE_NOSNIFF = True
+SECURE_REFERRER_POLICY = "same-origin"
+X_FRAME_OPTIONS = "DENY"
+if os.getenv("TRUST_PROXY_SSL_HEADER", "False").lower() == "true":
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+elif render_hostname:
+    # Render terminates TLS at its trusted proxy and supplies this header.
+    SECURE_PROXY_SSL_HEADER = ("HTTP_X_FORWARDED_PROTO", "https")
+
+if not DEBUG and any(origin == "*" for origin in CORS_ALLOWED_ORIGINS):
+    raise ImproperlyConfigured("Wildcard CORS origins are not allowed in production.")
+if not DEBUG:
+    if not _frontend_url or not _frontend_url.startswith("https://"):
+        raise ImproperlyConfigured("Set FRONTEND_URL to the HTTPS production frontend origin.")
+    if any(not origin.startswith("https://") for origin in CORS_ALLOWED_ORIGINS):
+        raise ImproperlyConfigured("Production CORS origins must use HTTPS.")
+    if any(not origin.startswith("https://") for origin in CSRF_TRUSTED_ORIGINS):
+        raise ImproperlyConfigured("Production CSRF trusted origins must use HTTPS.")
+    if not SECURE_SSL_REDIRECT or SECURE_HSTS_SECONDS < 1:
+        raise ImproperlyConfigured("Production requires HTTPS redirects and a positive HSTS duration.")
+    if not SESSION_COOKIE_SECURE or not CSRF_COOKIE_SECURE or SESSION_COOKIE_SAMESITE != "None" or CSRF_COOKIE_SAMESITE != "None":
+        raise ImproperlyConfigured("Production requires Secure, cross-site session and CSRF cookies for the separate frontend/API origins.")
+
+DATA_UPLOAD_MAX_MEMORY_SIZE = 26 * 1024 * 1024
+FILE_UPLOAD_MAX_MEMORY_SIZE = 5 * 1024 * 1024
+DATA_UPLOAD_MAX_NUMBER_FIELDS = 1000
+
+REDIS_URL = os.getenv("REDIS_URL", "").strip()
+if not DEBUG and not REDIS_URL:
+    raise ImproperlyConfigured("Configure REDIS_URL for shared production API rate limits.")
+if REDIS_URL:
+    CACHES = {
+        "default": {
+            "BACKEND": "django_redis.cache.RedisCache",
+            "LOCATION": REDIS_URL,
+            "OPTIONS": {"CLIENT_CLASS": "django_redis.client.DefaultClient", "SOCKET_CONNECT_TIMEOUT": 3, "SOCKET_TIMEOUT": 3},
+            "KEY_PREFIX": "papermind",
+        }
+    }
+else:
+    CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache", "LOCATION": "papermind-dev"}}
+
+EMAIL_BACKEND = os.getenv(
+    "EMAIL_BACKEND",
+    "django.core.mail.backends.console.EmailBackend" if DEBUG else "django.core.mail.backends.smtp.EmailBackend",
+)
+EMAIL_HOST = os.getenv("EMAIL_HOST", "localhost")
+EMAIL_PORT = int(os.getenv("EMAIL_PORT", "25"))
+EMAIL_HOST_USER = os.getenv("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.getenv("EMAIL_HOST_PASSWORD", "")
+EMAIL_USE_TLS = os.getenv("EMAIL_USE_TLS", "False").lower() == "true"
+DEFAULT_FROM_EMAIL = os.getenv("DEFAULT_FROM_EMAIL", "PaperMind AI <noreply@papermind.local>")
+if not DEBUG and (not EMAIL_HOST or EMAIL_HOST.lower() in {"localhost", "127.0.0.1"}
+                  or DEFAULT_FROM_EMAIL.endswith("@papermind.local>")
+                  or EMAIL_BACKEND.endswith("console.EmailBackend")):
+    raise ImproperlyConfigured("Configure a real production SMTP host and sender address for account recovery.")

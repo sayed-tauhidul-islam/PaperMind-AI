@@ -10,15 +10,14 @@ API_URL = "https://api.groq.com/openai/v1/chat/completions"
 MODEL = "openai/gpt-oss-120b"
 
 
-# Keep the full request (prompt + completion allowance) comfortably below
-# Groq's 8k TPM on-demand limit. Long PDFs are sampled across their pages.
-CONTEXT_LIMIT = 18000
+# Keep a useful spread of page excerpts while leaving room for a structured response.
+CONTEXT_LIMIT = 30000
 METADATA_TERMS = re.compile(
     r"author|published|publication|journal|conference|proceedings|review article|"
     r"dataset|data set|data availability|supplementary|github|repository|"
     r"model|architecture|benchmark|experiment|methodology|materials and methods|"
     r"result|accuracy|precision|recall|f1|mAP|mean average precision|evaluation|"
-    r"performance|proposed|contribution|solv(e|ed|ing)|problem",
+    r"performance|proposed|contribution|solv(e|ed|ing)|problem|table|figure|sample|bias|limitation",
     re.IGNORECASE,
 )
 
@@ -211,8 +210,8 @@ def _normalize_analysis(analysis, source_text, pdf_metadata=None):
         if _is_missing(analysis.get(field)) and fallback:
             analysis[field] = fallback
 
-    # The model tended to repeat a default-looking confidence score. Derive a
-    # reproducible coverage estimate from the fields it actually identified.
+    # Keep the displayed confidence reproducible: reward both analyzed areas
+    # and evidence excerpts that can be checked against the selected source page.
     coverage_fields = [
         overview.get(key) for key in (
             "topic", "authors", "paper_year", "publication_type",
@@ -224,15 +223,38 @@ def _normalize_analysis(analysis, source_text, pdf_metadata=None):
         "results", "problems_solved", "proposed_solution",
     )]
     covered = sum(not _is_missing(value) for value in coverage_fields)
-    score = round(covered * 100 / len(coverage_fields))
+    coverage_ratio = covered / max(1, len(coverage_fields))
+    evidence_items = analysis.get("evidence") if isinstance(analysis.get("evidence"), list) else []
+    source_pages = {
+        int(number): re.sub(r"\s+", " ", body).strip().casefold()
+        for number, body in re.findall(r"\[Page\s+(\d+)\]\s*([\s\S]*?)(?=\n\[Page\s+\d+\]|\Z)", source_text)
+    }
+    checked = []
+    for item in evidence_items:
+        if not isinstance(item, dict):
+            continue
+        quote = re.sub(r"\s+", " ", str(item.get("support", ""))).strip().casefold()
+        page = item.get("page")
+        source = source_pages.get(page, "") if isinstance(page, int) else " ".join(source_pages.values())
+        verified = bool(quote) and quote in source
+        item["verified"] = verified
+        checked.append(verified)
+    evidence_ratio = sum(checked) / len(checked) if checked else 0
+    # A report without verifiable source excerpts cannot display >70 even if
+    # every field is populated; coverage is not a scientific-validity score.
+    score = round((coverage_ratio * 0.7 + evidence_ratio * 0.3) * 100)
     confidence = analysis.get("confidence")
     if not isinstance(confidence, dict):
         confidence = {}
     confidence["score"] = score
+    confidence["source_coverage"] = round(coverage_ratio * 100)
+    confidence["verified_evidence"] = sum(checked)
+    confidence["evidence_checked"] = len(checked)
+    confidence["evidence_match_rate"] = round(evidence_ratio * 100)
     confidence["explanation"] = (
-        f"{covered} of {len(coverage_fields)} requested metadata and analysis areas "
-        "contained paper-supported information. This is a coverage estimate, not a "
-        "measure of scientific correctness."
+        f"{covered}/{len(coverage_fields)} analysis areas were populated; "
+        f"{sum(checked)}/{len(checked)} cited passages matched the extracted source text. "
+        "This coverage-and-match indicator is not a measure of scientific correctness."
     )
     analysis["confidence"] = confidence
     return analysis
@@ -281,7 +303,7 @@ Use exactly this structure:
   "conclusion": ["Conclusion point"],
   "limitations": ["Limitation 1", "Limitation 2"],
   "future_research": ["Direction 1", "Direction 2"],
-  "summary": ["One concise, paper-grounded summary point; provide 15-30 distinct points when the paper contains enough information"],
+    "summary": ["8-12 concise, distinct points summarizing the paper's scope, approach, data, results, and implications when supported"],
   "confidence": {{
     "score": 0,
     "explanation": "Explain how complete and clear the paper's evidence is"
@@ -307,7 +329,9 @@ Rules:
 - Set page to an integer only when the page number is explicitly identifiable; otherwise use null.
 - Write in clear, understandable English.
 - Present all analysis sections as concise bullet-ready arrays, not paragraphs.
-- The summary must contain at least 15 distinct, useful bullet points for a substantive paper, and may contain 30 or more when justified. Do not pad with repetition; summarize the paper's scope, approach, data, experiments, results, and implications.
+- Keep the summary to 8-12 distinct, useful points. Do not pad with repetition; cover scope, approach, data, experiments, results, and implications when the text supports them.
+- Make the analysis useful as a complete research-paper reading: cover the study design, data preparation, baselines, evaluation setup, quantitative and qualitative results, limitations, and implications wherever the supplied pages support them. Preserve conditions and comparisons attached to reported numbers.
+- Keep related details together and make each bullet understandable without relying on another section. Separate what the authors did, what they observed, and what they conclude.
 - In paper_year, include both publication month and year when explicitly present; do not substitute upload date or PDF creation date.
 - In paper_overview, report only metadata that is explicitly present or directly supported by the paper. Do not infer authors, year, venue/type, dataset availability, or model names.
 - Include every named model with a one-line explanation. If no model is named, return an empty models array.
@@ -316,6 +340,8 @@ Rules:
 - In problems_solved, connect each addressed research problem to the paper's stated approach/result. Do not claim a problem was solved completely if the paper only reports an improvement or evaluation.
 - In proposed_solution, describe the authors' proposed method/contribution that addresses the identified problems. If the paper proposes no distinct solution, return an empty array.
 - Search all supplied page excerpts for the requested metadata. Front matter may identify authors/year/type; methods and data-availability sections may identify datasets. Do not return "Not stated" if the supplied text contains the answer.
+- Read extracted table rows and figure captions/OCR labels as paper evidence. Preserve which model, dataset, split, and metric each value belongs to. Do not infer visual chart trends from captions or OCR labels alone.
+- For research quality, report the stated sample or dataset size, baselines, evaluation design, and author-reported bias/limitations when present. Separate explicit author statements from your own cautious appraisal; mark missing details as not stated.
 
 PDF FILE METADATA (may be incomplete; prefer the paper text for publication facts):
 {json.dumps(pdf_metadata or {}, ensure_ascii=False)}
@@ -345,8 +371,8 @@ RESEARCH PAPER CONTEXT SELECTED FROM THE FULL DOCUMENT:
         # GPT-OSS spends part of its completion budget on reasoning before
         # emitting the JSON body. Keep reasoning light and leave enough room
         # for the full analysis so it does not return truncated/empty JSON.
-        "max_completion_tokens": 3000,
-        "reasoning_effort": "low",
+        "max_completion_tokens": 4000,
+        "reasoning_effort": "medium",
         "reasoning_format": "hidden",
         "response_format": {"type": "json_object"},
     }

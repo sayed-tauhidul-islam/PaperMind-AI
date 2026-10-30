@@ -1,5 +1,6 @@
 Django==5.2.18
 djangorestframework
+django-redis>=5.4,<6
 django-cors-headers
 python-dotenv
 PyMuPDF
