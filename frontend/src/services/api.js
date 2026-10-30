@@ -1,11 +1,22 @@
-export const API_BASE_URL = (import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8000/api" : "")).replace(/\/$/, "");
+const configuredApiUrl = import.meta.env.VITE_API_URL || (import.meta.env.DEV ? "http://localhost:8000/api" : "");
+const normalizedApiUrl = configuredApiUrl.trim().replace(/\/+$/, "");
+export const API_BASE_URL = normalizedApiUrl
+  ? (normalizedApiUrl.endsWith("/api") ? normalizedApiUrl : `${normalizedApiUrl}/api`)
+  : "";
 let csrfToken = "";
 
 async function getCsrfToken() {
   if (csrfToken) return csrfToken;
-  const response = await fetch(`${API_BASE_URL}/auth/csrf/`, { credentials: "include", headers: { Accept: "application/json" } });
+  let response;
+  try {
+    response = await fetch(`${API_BASE_URL}/auth/csrf/`, { credentials: "include", headers: { Accept: "application/json" } });
+  } catch {
+    throw new Error("Could not reach the PaperMind API. Check VITE_API_URL in Vercel and allow this site's exact origin in the backend CORS settings.");
+  }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.csrfToken) throw new Error("Could not establish a secure request session. Refresh and try again.");
+  if (response.status === 404) throw new Error(`CSRF endpoint not found at ${API_BASE_URL}/auth/csrf/. Set VITE_API_URL to your backend host (with or without /api) and redeploy the backend if needed.`);
+  if (!response.ok) throw new Error(`The API could not start a secure session (HTTP ${response.status}). Check the backend deployment and logs.`);
+  if (!data.csrfToken) throw new Error("The API responded without a CSRF token. Confirm VITE_API_URL points to the current PaperMind backend, then redeploy both services.");
   csrfToken = data.csrfToken;
   return csrfToken;
 }
